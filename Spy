@@ -1,0 +1,1662 @@
+--==================================================================
+--  NETWORK SPY
+--==================================================================
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local TweenService      = game:GetService("TweenService")
+local Players           = game:GetService("Players")
+
+local BASE_W, BASE_H   = 780, 480
+local PRINT_TO_CONSOLE = false   -- mirror every call into the console
+local BLOCK_INVOKES    = true    -- false = Block only drops FireServer, invokes pass through
+
+--==================== THEME ====================
+local T = {
+    Base    = Color3.fromRGB(15, 16, 22),
+    Surface = Color3.fromRGB(21, 23, 31),
+    Card    = Color3.fromRGB(28, 31, 41),
+    Hover   = Color3.fromRGB(38, 42, 55),
+    Border  = Color3.fromRGB(45, 49, 64),
+    Text    = Color3.fromRGB(233, 236, 244),
+    Dim     = Color3.fromRGB(138, 145, 165),
+    Accent  = Color3.fromRGB(104, 133, 255),
+    Success = Color3.fromRGB(72, 199, 142),
+    Warning = Color3.fromRGB(238, 176, 70),
+    Danger  = Color3.fromRGB(233, 91, 101),
+    Violet  = Color3.fromRGB(163, 112, 246),
+}
+
+local PALETTE = {
+    Color3.fromRGB(104,133,255), Color3.fromRGB(72,199,142), Color3.fromRGB(238,176,70),
+    Color3.fromRGB(233,91,101),  Color3.fromRGB(163,112,246), Color3.fromRGB(86,204,242),
+    Color3.fromRGB(242,140,190), Color3.fromRGB(255,159,102), Color3.fromRGB(126,217,87),
+    Color3.fromRGB(180,190,210),
+}
+
+--==================== STATE ====================
+local IsPaused          = false
+local BlockedFunctions  = {}
+local BlockedRemoteInstances = {}
+local ExcludedFunctions = {}
+local CalledFunctions   = {}
+local callTracebacks    = {}
+local serviceColors     = {}
+local serviceColorIndex = 1
+
+local SelectedId, SelectedVariantKey
+local SelectedFullPath, SelectedArgs, SelectedRawArgs, SelectedRemoteInstance
+local oldNamecall
+
+--==================== HELPERS ====================
+local function corner(p, r)
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r or 8); c.Parent = p; return c
+end
+
+local function stroke(p, col, th, tr)
+    local s = Instance.new("UIStroke")
+    s.Color = col or T.Border; s.Thickness = th or 1; s.Transparency = tr or 0
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; s.Parent = p; return s
+end
+
+local function pad(p, all, l, r, t, b)
+    local u = Instance.new("UIPadding")
+    u.PaddingLeft   = UDim.new(0, l or all or 0)
+    u.PaddingRight  = UDim.new(0, r or all or 0)
+    u.PaddingTop    = UDim.new(0, t or all or 0)
+    u.PaddingBottom = UDim.new(0, b or all or 0)
+    u.Parent = p; return u
+end
+
+local function baseText(inst, size)
+    inst:SetAttribute("BaseTextSize", size); inst.TextSize = size; return inst
+end
+
+local function frame(parent, name, pos, size, color)
+    local f = Instance.new("Frame")
+    f.Name = name; f.Parent = parent
+    f.Position = pos; f.Size = size
+    f.BackgroundColor3 = color or T.Surface
+    f.BorderSizePixel = 0
+    return f
+end
+
+local function tw(inst, props, time)
+    TweenService:Create(inst, TweenInfo.new(time or 0.14, Enum.EasingStyle.Quad), props):Play()
+end
+
+--==================== SHELL ====================
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "NetworkSpy"
+Gui.ResetOnSpawn = false
+Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+Gui.DisplayOrder = 9999
+Gui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
+
+local Main = frame(Gui, "Main", UDim2.new(0.5, -BASE_W/2, 0.5, -BASE_H/2),
+                   UDim2.new(0, BASE_W, 0, BASE_H), T.Base)
+corner(Main, 14)
+stroke(Main, T.Border, 1, 0.15)
+
+--==================== HEADER ====================
+local Header = frame(Main, "Header", UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 0, 46), T.Surface)
+corner(Header, 14)
+frame(Header, "HeaderFill", UDim2.new(0, 0, 1, -14), UDim2.new(1, 0, 0, 14), T.Surface)
+pad(Header, nil, 16, 10, 0, 0)
+
+local Dot = frame(Header, "Dot", UDim2.new(0, 0, 0.5, -4), UDim2.new(0, 8, 0, 8), T.Success)
+corner(Dot, 4)
+
+local Title = Instance.new("TextLabel")
+Title.Parent = Header
+Title.BackgroundTransparency = 1
+Title.Position = UDim2.new(0, 18, 0, 0)
+Title.Size = UDim2.new(0, 180, 1, 0)
+Title.Font = Enum.Font.GothamBold
+Title.Text = "Network Spy"
+Title.TextColor3 = T.Text
+Title.TextXAlignment = Enum.TextXAlignment.Left
+baseText(Title, 15)
+
+local StatusPill = frame(Header, "StatusPill", UDim2.new(0, 200, 0.5, -12), UDim2.new(0, 160, 0, 24), T.Card)
+corner(StatusPill, 12)
+stroke(StatusPill, T.Border, 1, 0.3)
+
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.Parent = StatusPill
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Size = UDim2.new(1, 0, 1, 0)
+StatusLabel.Font = Enum.Font.GothamMedium
+StatusLabel.Text = "Monitoring"
+StatusLabel.TextColor3 = T.Success
+baseText(StatusLabel, 12)
+
+local function winButton(name, glyph, xOffset, col)
+    local b = Instance.new("TextButton")
+    b.Name = name; b.Parent = Header
+    b.BackgroundColor3 = T.Card
+    b.BorderSizePixel = 0
+    b.AutoButtonColor = false
+    b.Position = UDim2.new(1, xOffset, 0.5, -13)
+    b.Size = UDim2.new(0, 26, 0, 26)
+    b.Font = Enum.Font.GothamBold
+    b.Text = glyph
+    b.TextColor3 = T.Dim
+    baseText(b, 14)
+    corner(b, 8)
+    b.MouseEnter:Connect(function() tw(b, {BackgroundColor3 = col, TextColor3 = Color3.new(1,1,1)}) end)
+    b.MouseLeave:Connect(function() tw(b, {BackgroundColor3 = T.Card, TextColor3 = T.Dim}) end)
+    return b
+end
+
+local Close = winButton("Close", "✕", -26, T.Danger)
+local Hide  = winButton("Hide",  "—", -58, T.Accent)
+
+--==================== BODY ====================
+local Body = frame(Main, "Body", UDim2.new(0, 0, 0, 46), UDim2.new(1, 0, 1, -92), T.Base)
+Body.BackgroundTransparency = 1
+pad(Body, 12)
+
+-- ---------- Sidebar ----------
+local Sidebar = frame(Body, "Sidebar", UDim2.new(0, 0, 0, 0), UDim2.new(0, 240, 1, 0), T.Surface)
+corner(Sidebar, 10)
+stroke(Sidebar, T.Border, 1, 0.35)
+pad(Sidebar, 8)
+
+local SearchBar = Instance.new("TextBox")
+SearchBar.Name = "SearchBar"
+SearchBar.Parent = Sidebar
+SearchBar.BackgroundColor3 = T.Card
+SearchBar.BorderSizePixel = 0
+SearchBar.Size = UDim2.new(1, 0, 0, 30)
+SearchBar.Font = Enum.Font.Gotham
+SearchBar.PlaceholderText = "Search calls…"
+SearchBar.PlaceholderColor3 = T.Dim
+SearchBar.Text = ""
+SearchBar.TextColor3 = T.Text
+SearchBar.TextXAlignment = Enum.TextXAlignment.Left
+SearchBar.ClearTextOnFocus = false
+baseText(SearchBar, 13)
+corner(SearchBar, 8)
+local searchStroke = stroke(SearchBar, T.Border, 1, 0.3)
+pad(SearchBar, nil, 10, 10, 0, 0)
+SearchBar.Focused:Connect(function() tw(searchStroke, {Color = T.Accent, Transparency = 0}) end)
+SearchBar.FocusLost:Connect(function() tw(searchStroke, {Color = T.Border, Transparency = 0.3}) end)
+
+local CountLabel = Instance.new("TextLabel")
+CountLabel.Parent = Sidebar
+CountLabel.BackgroundTransparency = 1
+CountLabel.Position = UDim2.new(0, 2, 0, 36)
+CountLabel.Size = UDim2.new(1, -4, 0, 18)
+CountLabel.Font = Enum.Font.GothamMedium
+CountLabel.Text = "0 REMOTES"
+CountLabel.TextColor3 = T.Dim
+CountLabel.TextXAlignment = Enum.TextXAlignment.Left
+baseText(CountLabel, 10)
+
+local FunctionList = Instance.new("ScrollingFrame")
+FunctionList.Name = "FunctionList"
+FunctionList.Parent = Sidebar
+FunctionList.BackgroundTransparency = 1
+FunctionList.BorderSizePixel = 0
+FunctionList.Position = UDim2.new(0, 0, 0, 58)
+FunctionList.Size = UDim2.new(1, 0, 1, -58)
+FunctionList.CanvasSize = UDim2.new(0, 0, 0, 0)
+FunctionList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+FunctionList.ScrollBarThickness = 3
+FunctionList.ScrollBarImageColor3 = T.Border
+
+local ListLayout = Instance.new("UIListLayout")
+ListLayout.Parent = FunctionList
+ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ListLayout.Padding = UDim.new(0, 4)
+
+local Template = Instance.new("TextButton")
+Template.Name = "Entry"
+Template.BackgroundColor3 = T.Card
+Template.BorderSizePixel = 0
+Template.AutoButtonColor = false
+Template.Size = UDim2.new(1, -6, 0, 36)
+Template.Text = ""
+corner(Template, 8)
+
+local ColorBar = frame(Template, "ColorBar", UDim2.new(0, 8, 0.5, -9), UDim2.new(0, 3, 0, 18), T.Accent)
+corner(ColorBar, 2)
+
+local EntryName = Instance.new("TextLabel")
+EntryName.Name = "FunctionName"
+EntryName.Parent = Template
+EntryName.BackgroundTransparency = 1
+EntryName.Position = UDim2.new(0, 18, 0, 0)
+EntryName.Size = UDim2.new(1, -60, 1, 0)
+EntryName.Font = Enum.Font.Code
+EntryName.Text = "Remote:FireServer"
+EntryName.TextColor3 = T.Text
+EntryName.TextXAlignment = Enum.TextXAlignment.Left
+EntryName.TextTruncate = Enum.TextTruncate.AtEnd
+baseText(EntryName, 12)
+
+local Badge = frame(Template, "Badge", UDim2.new(1, -38, 0.5, -9), UDim2.new(0, 30, 0, 18), T.Hover)
+corner(Badge, 9)
+local BadgeText = Instance.new("TextLabel")
+BadgeText.Name = "BadgeText"
+BadgeText.Parent = Badge
+BadgeText.BackgroundTransparency = 1
+BadgeText.Size = UDim2.new(1, 0, 1, 0)
+BadgeText.Font = Enum.Font.GothamBold
+BadgeText.Text = "1"
+BadgeText.TextColor3 = T.Dim
+baseText(BadgeText, 10)
+
+
+local Details = frame(Body, "Details", UDim2.new(0, 252, 0, 0), UDim2.new(1, -252, 1, 0), T.Base)
+Details.BackgroundTransparency = 1
+
+local VariantBar = Instance.new("ScrollingFrame")
+VariantBar.Name = "VariantBar"
+VariantBar.Parent = Details
+VariantBar.BackgroundTransparency = 1
+VariantBar.BorderSizePixel = 0
+VariantBar.Size = UDim2.new(1, 0, 0, 28)
+VariantBar.CanvasSize = UDim2.new(0, 0, 0, 0)
+VariantBar.AutomaticCanvasSize = Enum.AutomaticSize.X
+VariantBar.ScrollBarThickness = 0
+VariantBar.ScrollingDirection = Enum.ScrollingDirection.X
+
+local VariantLayout = Instance.new("UIListLayout")
+VariantLayout.Parent = VariantBar
+VariantLayout.FillDirection = Enum.FillDirection.Horizontal
+VariantLayout.SortOrder = Enum.SortOrder.LayoutOrder
+VariantLayout.Padding = UDim.new(0, 6)
+
+local DetailsCard = frame(Details, "DetailsCard", UDim2.new(0, 0, 0, 36), UDim2.new(1, 0, 1, -92), T.Surface)
+corner(DetailsCard, 10)
+stroke(DetailsCard, T.Border, 1, 0.35)
+
+local DetailsScroll = Instance.new("ScrollingFrame")
+DetailsScroll.Name = "DetailsScroll"
+DetailsScroll.Parent = DetailsCard
+DetailsScroll.BackgroundTransparency = 1
+DetailsScroll.BorderSizePixel = 0
+DetailsScroll.Size = UDim2.new(1, 0, 1, 0)
+DetailsScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+DetailsScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+DetailsScroll.ScrollBarThickness = 3
+DetailsScroll.ScrollBarImageColor3 = T.Border
+pad(DetailsScroll, 14)
+
+local DetailsText = Instance.new("TextLabel")
+DetailsText.Name = "DetailsText"
+DetailsText.Parent = DetailsScroll
+DetailsText.BackgroundTransparency = 1
+DetailsText.Size = UDim2.new(1, -8, 0, 0)
+DetailsText.AutomaticSize = Enum.AutomaticSize.Y
+DetailsText.Font = Enum.Font.Code
+DetailsText.TextColor3 = T.Text
+DetailsText.TextXAlignment = Enum.TextXAlignment.Left
+DetailsText.TextYAlignment = Enum.TextYAlignment.Top
+DetailsText.TextWrapped = true
+DetailsText.RichText = true
+DetailsText.Text = ""
+baseText(DetailsText, 13)
+
+-- ---------- Toolbar ----------
+local Toolbar = frame(Details, "Toolbar", UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 0, 58), T.Base)
+Toolbar.Position = UDim2.new(0, 0, 1, -58)
+Toolbar.BackgroundTransparency = 1
+
+local Grid = Instance.new("UIGridLayout")
+Grid.Parent = Toolbar
+Grid.CellSize = UDim2.new(0, 100, 0, 26)
+Grid.CellPadding = UDim2.new(0, 6, 0, 6)
+Grid.SortOrder = Enum.SortOrder.LayoutOrder
+Grid.HorizontalAlignment = Enum.HorizontalAlignment.Center
+Grid.VerticalAlignment = Enum.VerticalAlignment.Center
+
+local function updateToolbarGrid()
+    local width = math.max(Toolbar.AbsoluteSize.X - 24, 1)
+    local usable = math.max(width - (6 * 2), 1)
+    local cellW = math.max((usable / 3), 88)
+    Grid.CellSize = UDim2.new(0, cellW, 0, 26)
+end
+Toolbar:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateToolbarGrid)
+updateToolbarGrid()
+
+local function actionButton(parent, name, text, col, order)
+    local b = Instance.new("TextButton")
+    b.Name = name; b.Parent = parent
+    b.BackgroundColor3 = T.Card
+    b.BorderSizePixel = 0
+    b.AutoButtonColor = false
+    b.LayoutOrder = order or 1
+    b.Font = Enum.Font.GothamMedium
+    b.Text = text
+    b.TextColor3 = T.Text
+    b.TextScaled = true
+    b.TextWrapped = false
+    b.TextXAlignment = Enum.TextXAlignment.Center
+    b.TextYAlignment = Enum.TextYAlignment.Center
+    b.ClipsDescendants = true
+    baseText(b, 12)
+    corner(b, 8)
+    local st = stroke(b, col, 1, 0.55)
+
+    local accentDot = frame(b, "Accent", UDim2.new(0, 10, 0.5, -3), UDim2.new(0, 6, 0, 6), col)
+    corner(accentDot, 3)
+
+    b.MouseEnter:Connect(function()
+        tw(b, {BackgroundColor3 = T.Hover}); tw(st, {Transparency = 0.15})
+    end)
+    b.MouseLeave:Connect(function()
+        tw(b, {BackgroundColor3 = T.Card}); tw(st, {Transparency = 0.55})
+    end)
+    return b, st, accentDot
+end
+
+local CopyButton     = actionButton(Toolbar, "Copy",     "Copy",      T.Accent,  1)
+local DeepCopyButton = actionButton(Toolbar, "DeepCopy", "Deep Copy", T.Violet,  2)
+local RunButton      = actionButton(Toolbar, "Run",      "Run",       T.Success, 3)
+local LoopButton     = actionButton(Toolbar, "Loop",     "Loop",      T.Warning, 4)
+local ExcludeButton, ExcludeStroke, ExcludeDot = actionButton(Toolbar, "Exclude", "Exclude", T.Accent, 5)
+local BlockButton,   BlockStroke,   BlockDot   = actionButton(Toolbar, "Block",   "Block",   T.Danger, 6)
+
+--==================== FOOTER ====================
+local Footer = frame(Main, "Footer", UDim2.new(0, 0, 1, -46), UDim2.new(1, 0, 0, 46), T.Surface)
+corner(Footer, 14)
+frame(Footer, "FooterFill", UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 0, 14), T.Surface)
+pad(Footer, nil, 12, 12, 6, 6)
+
+local FooterLayout = Instance.new("UIListLayout")
+FooterLayout.Parent = Footer
+FooterLayout.FillDirection = Enum.FillDirection.Horizontal
+FooterLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+FooterLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+FooterLayout.Padding = UDim.new(0, 8)
+FooterLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local function footerButton(text, col, order)
+    local b = Instance.new("TextButton")
+    b.Parent = Footer
+    b.BackgroundColor3 = T.Card
+    b.BorderSizePixel = 0
+    b.AutoButtonColor = false
+    b.Size = UDim2.new(0, 100, 0, 28)
+    b.LayoutOrder = order
+    b.Font = Enum.Font.GothamMedium
+    b.Text = text
+    b.TextColor3 = T.Dim
+    b.TextScaled = true
+    b.TextWrapped = false
+    b.TextXAlignment = Enum.TextXAlignment.Center
+    b.TextYAlignment = Enum.TextYAlignment.Center
+    b.ClipsDescendants = true
+    b.TextTruncate = Enum.TextTruncate.AtEnd
+    baseText(b, 11)
+    corner(b, 7)
+    b.MouseEnter:Connect(function() tw(b, {BackgroundColor3 = T.Hover, TextColor3 = col}) end)
+    b.MouseLeave:Connect(function() tw(b, {BackgroundColor3 = T.Card, TextColor3 = T.Dim}) end)
+    return b
+end
+
+local function updateFooterButtons()
+    local width = math.max(Footer.AbsoluteSize.X - 24, 1)
+    local usable = math.max(width - (8 * 3), 1)
+    local cellW = math.max((usable / 4), 80)
+    for _, child in ipairs(Footer:GetChildren()) do
+        if child:IsA("TextButton") then
+            child.Size = UDim2.new(0, cellW, 0, 28)
+        end
+    end
+end
+Footer:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateFooterButtons)
+updateFooterButtons()
+
+local ClearButton        = footerButton("Clear Log",     T.Danger,  1)
+local PauseButton        = footerButton("Pause",         T.Warning, 2)
+local UnblockAllButton   = footerButton("Unblock All",   T.Success, 3)
+local UnexcludeAllButton = footerButton("Unexclude All", T.Accent,  4)
+
+--==================== FLOATING PILL ====================
+local Floating = Instance.new("TextButton")
+Floating.Name = "Floating"
+Floating.Parent = Gui
+Floating.BackgroundColor3 = T.Surface
+Floating.BorderSizePixel = 0
+Floating.AutoButtonColor = false
+Floating.Position = UDim2.new(0, 40, 0, 40)
+Floating.Size = UDim2.new(0, 150, 0, 40)
+Floating.Font = Enum.Font.GothamBold
+Floating.Text = "Network Spy"
+Floating.TextColor3 = T.Text
+Floating.Visible = false
+baseText(Floating, 13)
+corner(Floating, 12)
+local floatStroke = stroke(Floating, T.Accent, 1, 0.4)
+Floating.MouseEnter:Connect(function() tw(Floating, {BackgroundColor3 = T.Card}); tw(floatStroke, {Transparency = 0}) end)
+Floating.MouseLeave:Connect(function() tw(Floating, {BackgroundColor3 = T.Surface}); tw(floatStroke, {Transparency = 0.4}) end)
+
+--==================== RESIZE GRIPS ====================
+local Grips = {}
+local function grip(name, pos, visible)
+    local g = Instance.new("Frame")
+    g.Name = name; g.Parent = Main
+    g.Position = pos
+    g.Size = UDim2.new(0, 16, 0, 16)
+    g.BackgroundColor3 = T.Accent
+    g.BackgroundTransparency = visible and 0.4 or 1
+    g.BorderSizePixel = 0
+    g.ZIndex = 20
+    if visible then corner(g, 4) end
+    Grips[name] = g
+    return g
+end
+grip("TopLeft",     UDim2.new(0, -6, 0, -6), false)
+grip("TopRight",    UDim2.new(1, -10, 0, -6), false)
+grip("BottomLeft",  UDim2.new(0, -6, 1, -10), false)
+grip("BottomRight", UDim2.new(1, -12, 1, -12), true)
+
+--==================== SCALING / STATUS ====================
+local function updateScale()
+    local s = math.clamp(math.min(Main.AbsoluteSize.X / BASE_W, Main.AbsoluteSize.Y / BASE_H), 0.8, 1.5)
+    for _, d in ipairs(Gui:GetDescendants()) do
+        local b = d:GetAttribute("BaseTextSize")
+        if b then d.TextSize = math.floor(b * s + 0.5) end
+    end
+end
+Main:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateScale)
+
+local function updateStatus(message, isError)
+    StatusLabel.Text = message
+    local col = isError and T.Danger or T.Success
+    tw(StatusLabel, {TextColor3 = col})
+    tw(Dot, {BackgroundColor3 = col})
+end
+
+local function describeBlockedTarget(fullPath, remoteInstance)
+    local path = tostring(fullPath or (remoteInstance and remoteInstance:GetFullName()) or "<unknown>")
+    if path == "<unknown>" then
+        return path
+    end
+    return path:gsub("^game%.", "")
+end
+
+local function getServiceColor(serviceName)
+    if not serviceColors[serviceName] then
+        serviceColors[serviceName] = PALETTE[serviceColorIndex]
+        serviceColorIndex = serviceColorIndex % #PALETTE + 1
+    end
+    return serviceColors[serviceName]
+end
+
+--==================== FORMATTING ====================
+local function getInstancePath(instance)
+    if not instance then return "nil" end
+    if not instance.Parent then
+        local ok, id = pcall(function() return instance:GetDebugId() end)
+        return ('GetNil("%s", "%s")'):format(instance.Name, ok and id or "unknown")
+    end
+    local path, current, lp = {}, instance, Players.LocalPlayer
+    while current and current ~= game do
+        if current == lp then table.insert(path, 1, 'game:GetService("Players").LocalPlayer'); break end
+        if current.Parent == game then table.insert(path, 1, ('game:GetService("%s")'):format(current.ClassName)); break end
+        local n = current.Name
+        if n:match("^[_a-zA-Z][_a-zA-Z0-9]*$") then
+            table.insert(path, 1, "." .. n)
+        else
+            table.insert(path, 1, '["' .. n:gsub('"', '\\"') .. '"]')
+        end
+        current = current.Parent
+    end
+    local res = table.concat(path, "")
+    if res:sub(1, 1) == "." then res = "game" .. res end
+    return res
+end
+
+local function escapeRich(s)
+    return (tostring(s):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
+end
+
+local function formatValue(val, depth)
+    depth = depth or 0
+    if depth > 3 then return "..." end
+    local t = typeof(val)
+    if t == "string" then
+        return '"' .. val:gsub('"', '\\"'):gsub("\n", "\\n") .. '"'
+    elseif t == "number" or t == "boolean" or t == "nil" then
+        return tostring(val)
+    elseif t == "Instance" then
+        return getInstancePath(val)
+    elseif t == "table" then
+        local items, count = {}, 0
+        for k, v in pairs(val) do
+            count += 1
+            if count > 10 then table.insert(items, "..."); break end
+            local key
+            if typeof(k) == "string" and k:match("^[%a_][%w_]*$") then key = k
+            elseif typeof(k) == "string" then key = '["' .. k .. '"]'
+            else key = "[" .. formatValue(k, depth + 1) .. "]" end
+            table.insert(items, key .. " = " .. formatValue(v, depth + 1))
+        end
+        return #items == 0 and "{}" or "{" .. table.concat(items, ", ") .. "}"
+    elseif t == "Vector3" then
+        return ("Vector3.new(%.2f, %.2f, %.2f)"):format(val.X, val.Y, val.Z)
+    elseif t == "Vector2" then
+        return ("Vector2.new(%.2f, %.2f)"):format(val.X, val.Y)
+    elseif t == "Color3" then
+        return ("Color3.new(%.3f, %.3f, %.3f)"):format(val.R, val.G, val.B)
+    elseif t == "UDim2" then
+        return ("UDim2.new(%.2f, %d, %.2f, %d)"):format(val.X.Scale, val.X.Offset, val.Y.Scale, val.Y.Offset)
+    elseif t == "CFrame" then
+        return "CFrame.new(" .. tostring(val.Position) .. ")"
+    elseif t == "EnumItem" then
+        return "Enum." .. tostring(val.EnumType) .. "." .. val.Name
+    end
+    return tostring(val)
+end
+
+local function formatArgs(args)
+    if not args or #args == 0 then return "()" end
+    local out = {}
+    for _, a in ipairs(args) do table.insert(out, formatValue(a)) end
+    return "(" .. table.concat(out, ", ") .. ")"
+end
+
+local function serializeKeyValue(value, seen)
+    seen = seen or {}
+    local vType = typeof(value)
+
+    if value == nil then return "nil" end
+    if vType == "string" then return "string:" .. value end
+    if vType == "number" or vType == "boolean" then return vType .. ":" .. tostring(value) end
+    if vType == "EnumItem" then return "enum:" .. tostring(value.EnumType) .. "." .. value.Name end
+    if vType == "Instance" then
+        local ok, full = pcall(function() return value:GetFullName() end)
+        return ok and ("instance:" .. full) or ("instance:" .. tostring(value))
+    end
+    if vType == "table" then
+        if seen[value] then return "<recursion>" end
+        seen[value] = true
+        local keys = {}
+        for k in pairs(value) do table.insert(keys, tostring(k)) end
+        table.sort(keys)
+
+        local parts = {}
+        for _, key in ipairs(keys) do
+            local realKey = key
+            local okKey = tonumber(key)
+            local actualKey = okKey and okKey or key
+            local item = value[actualKey]
+            table.insert(parts, "[" .. serializeKeyValue(actualKey, seen) .. "]=" .. serializeKeyValue(item, seen))
+        end
+        seen[value] = nil
+        return "table:{" .. table.concat(parts, ",") .. "}"
+    end
+
+    return vType .. ":" .. tostring(value)
+end
+
+local function argsToKey(args)
+    if not args then return "" end
+    local parts = {}
+    for _, v in ipairs(args) do
+        table.insert(parts, serializeKeyValue(v, {}))
+    end
+    return table.concat(parts, "|")
+end
+
+local function normalizeSearchText(s)
+    local text = tostring(s or ""):lower()
+    text = text:gsub("[%[%]()%{%}%[%]" .. '"' .. "'`]", " ")
+    text = text:gsub("[^%w%s]", " ")
+    text = text:gsub("%s+", " ")
+    return text:match("^%s*(.-)%s*$") or ""
+end
+
+local function argsToSearchText(args)
+    if not args then return "" end
+    local out = {}
+
+    local function addValue(value)
+        if value == nil then return end
+        local vType = typeof(value)
+        local text = ""
+
+        if vType == "Instance" then
+            local ok, full = pcall(function() return value:GetFullName() end)
+            text = ok and full or tostring(value)
+        elseif vType == "string" then
+            text = value
+        elseif vType == "table" then
+            local seen = {}
+            local function walk(tbl)
+                if typeof(tbl) ~= "table" then
+                    return
+                end
+                if seen[tbl] then return end
+                seen[tbl] = true
+                for key, item in pairs(tbl) do
+                    local keyText = tostring(key)
+                    if typeof(key) == "string" then keyText = key end
+                    table.insert(out, normalizeSearchText(keyText))
+                    if item ~= nil then
+                        addValue(item)
+                    end
+                end
+            end
+            walk(value)
+            return
+        else
+            text = formatValue(value)
+        end
+
+        if text and text ~= "" then
+            table.insert(out, normalizeSearchText(text))
+        end
+    end
+
+    for _, value in ipairs(args) do
+        addValue(value)
+    end
+    return table.concat(out, " ")
+end
+
+local function getRemoteDisplayName(fullPath)
+    local path = tostring(fullPath or "")
+    if path == "" then return "Remote" end
+
+    local base = path:match("^(.-):[%w_]+$") or path
+    local name = base:match("([%w_]+)$") or base
+    if name == "" then
+        name = path:gsub("^game%.", "")
+    end
+    return name
+end
+
+local function isStrictOnClickCall(path, method)
+    if not path or not method then return false end
+    local lowerPath = tostring(path):lower()
+    local lowerMethod = tostring(method):lower()
+    return lowerMethod == "fireserver"
+        and string.find(lowerPath, "onclick", 1, true) ~= nil
+        and string.find(lowerPath, ":fireserver", 1, true) ~= nil
+end
+
+local function isDirectlyBlockedRemote(remoteInstance, path, method, args)
+    if typeof(remoteInstance) ~= "Instance" then
+        return false
+    end
+    if method ~= "FireServer" and method ~= "InvokeServer" then
+        return false
+    end
+
+    local fullPath = tostring(path or remoteInstance:GetFullName())
+    if BlockedRemoteInstances[remoteInstance] then
+        return true
+    end
+
+    if BlockedFunctions[fullPath] then
+        return true
+    end
+
+    if BlockedFunctions[fullPath .. ":" .. method] then
+        return true
+    end
+
+    if BlockedFunctions[getCallSignature(fullPath, args or {})] then
+        return true
+    end
+
+    return false
+end
+
+local function getCallSignature(path, args)
+    if not path then return "" end
+    local sig = path
+    local key = argsToKey(args or {})
+    if key ~= "" then
+        sig = sig .. "|" .. key
+    end
+    return sig
+end
+
+local function buildRemoteCallCode(remoteInstance, method, rawArgs)
+    local args = rawArgs or {}
+    local code = "local args = {\n"
+    for index, value in ipairs(args) do
+        code = code .. string.format("    [%d] = %s,\n", index, formatValue(value))
+    end
+    code = code .. "}\n\n"
+    code = code .. getInstancePath(remoteInstance) .. ":" .. method .. "(unpack(args))"
+    return code
+end
+
+--==================================================================
+--  HOOK INTERNALS  (your working code, unchanged)
+--==================================================================
+local function dumpTable(value, indent, visited)
+    indent = indent or 0
+    visited = visited or {}
+
+    if visited[value] then
+        print(string.rep("  ", indent) .. "<recursive table>")
+        return
+    end
+
+    visited[value] = true
+
+    for key, item in pairs(value) do
+        local prefix = string.rep("  ", indent)
+
+        if typeof(item) == "table" then
+            print(prefix .. "[" .. tostring(key) .. "] (table):")
+            dumpTable(item, indent + 1, visited)
+        else
+            print(string.format(
+                "%s[%s] (%s): %s",
+                prefix,
+                tostring(key),
+                typeof(item),
+                tostring(item)
+            ))
+        end
+    end
+
+    visited[value] = nil
+end
+
+local function getCallingScript()
+    if typeof(getcallingscript) ~= "function" then
+        return nil
+    end
+
+    local success, result = pcall(getcallingscript)
+
+    if success and typeof(result) == "Instance" then
+        return result
+    end
+
+    return nil
+end
+
+local function getTraceback()
+    local success, result = pcall(
+        debug.traceback,
+        "Remote call traceback",
+        3
+    )
+
+    if success then
+        return result
+    end
+
+    return "Traceback unavailable: " .. tostring(result)
+end
+
+local function getCallerFunction()
+    local success, info = pcall(debug.getinfo, 3, "f")
+    if success and info and info.func then
+        return info.func
+    end
+    return nil
+end
+
+local function describeValue(value, depth, visited)
+    depth = depth or 0
+    visited = visited or {}
+
+    if depth > 2 then
+        return "<max depth>"
+    end
+
+    local valueType = typeof(value)
+
+    if valueType == "string" then
+        return string.format("%q", value)
+    elseif valueType == "Instance" then
+        local success, path = pcall(value.GetFullName, value)
+        return success and path or "<Instance>"
+    elseif valueType ~= "table" and valueType ~= "function" then
+        return tostring(value)
+    end
+
+    if visited[value] then
+        return "<recursive>"
+    end
+    visited[value] = true
+
+    if valueType == "table" then
+        local items = {}
+        local count = 0
+
+        for key, item in pairs(value) do
+            count = count + 1
+            if count > 20 then
+                table.insert(items, "<more entries>")
+                break
+            end
+
+            table.insert(items, string.format(
+                "[%s] = %s",
+                tostring(key),
+                describeValue(item, depth + 1, visited)
+            ))
+        end
+
+        visited[value] = nil
+        return "{" .. table.concat(items, ", ") .. "}"
+    end
+
+    local functionInfo = {}
+    local infoSuccess, info = pcall(debug.getinfo, value)
+    if infoSuccess and info then
+        table.insert(functionInfo, string.format(
+            "source=%s, name=%s, line=%s",
+            tostring(info.source),
+            tostring(info.name),
+            tostring(info.currentline)
+        ))
+    end
+
+    if typeof(debug.getupvalue) == "function" then
+        local index = 1
+        while true do
+            local success, name, upvalue = pcall(debug.getupvalue, value, index)
+            if not success or not name then
+                break
+            end
+
+            table.insert(functionInfo, string.format(
+                "%s = %s",
+                tostring(name),
+                describeValue(upvalue, depth + 1, visited)
+            ))
+            index = index + 1
+        end
+    end
+
+    visited[value] = nil
+    return "function { " .. table.concat(functionInfo, "; ") .. " }"
+end
+
+local function getCallerUpvalues(callerFunction)
+    local upvalues = {}
+    if not callerFunction or typeof(debug.getupvalue) ~= "function" then
+        return upvalues
+    end
+
+    local index = 1
+    while true do
+        local success, name, value = pcall(
+            debug.getupvalue,
+            callerFunction,
+            index
+        )
+
+        if not success or not name then
+            break
+        end
+
+        upvalues[name] = value
+        index = index + 1
+    end
+
+    return upvalues
+end
+
+local function printUpvalues(upvalues)
+    local found = false
+
+    for name, value in pairs(upvalues or {}) do
+        found = true
+        print(string.format("  %s = %s", tostring(name), describeValue(value)))
+    end
+
+    if not found then
+        print("  <none or unavailable>")
+    end
+end
+
+local function logRemote(remote, method, args, sourceScript, traceback, upvalues)
+    local success, errorMessage = pcall(function()
+        print("========================================")
+        print("[REMOTE]:", remote:GetFullName())
+        print("[METHOD]:", method)
+
+        if sourceScript then
+            print("[CALLING SCRIPT]:", sourceScript:GetFullName())
+            print("[MODULE/CONTROLLER]:", sourceScript.Name)
+        else
+            print("[CALLING SCRIPT]: unavailable")
+            print("[MODULE/CONTROLLER]: unavailable")
+        end
+
+        print("[CALLER UPVALUES AND VALUES]:")
+        printUpvalues(upvalues)
+
+        print("[FULL TRACEBACK]:")
+        print(traceback)
+
+        print("[ARGUMENTS]:")
+
+        if #args == 0 then
+            print("  <none>")
+        else
+            for index, argument in ipairs(args) do
+                if typeof(argument) == "table" then
+                    print(string.format("  [%d] (table):", index))
+                    dumpTable(argument, 2)
+                else
+                    print(string.format(
+                        "  [%d] (%s): %s",
+                        index,
+                        typeof(argument),
+                        tostring(argument)
+                    ))
+                end
+            end
+        end
+
+        print("========================================")
+    end)
+
+    if not success then
+        warn("[Remote logger error]:", errorMessage)
+    end
+end
+
+--==================== DETAILS RENDER ====================
+local renderDetails
+
+local function isPathBlocked(data)
+    if not data then return false end
+    if BlockedFunctions[data.fullPath] then return true end
+    for _, k in ipairs(data.variantOrder) do
+        local v = data.variants[k]
+        if v then
+            local sig = getCallSignature(data.fullPath, v.rawArgs or v.args)
+            if BlockedFunctions[sig] or (v.remoteInstance and BlockedRemoteInstances[v.remoteInstance]) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function refreshEntryStyle(data)
+    if not data or not data.entry then return end
+    local blocked = isPathBlocked(data)
+    tw(data.entry.ColorBar, {BackgroundColor3 = blocked and T.Danger or data.serviceColor})
+    data.entry.FunctionName.TextColor3 = blocked and T.Dim or T.Text
+    data.entry.Badge.BadgeText.TextColor3 = blocked and T.Danger or T.Dim
+end
+
+local function variantChip(text, active, onClick)
+    local b = Instance.new("TextButton")
+    b.Parent = VariantBar
+    b.AutomaticSize = Enum.AutomaticSize.X
+    b.Size = UDim2.new(0, 0, 0, 24)
+    b.BackgroundColor3 = active and T.Accent or T.Card
+    b.BorderSizePixel = 0
+    b.AutoButtonColor = false
+    b.Font = Enum.Font.GothamMedium
+    b.Text = text
+    b.TextColor3 = active and Color3.new(1, 1, 1) or T.Dim
+    baseText(b, 11)
+    corner(b, 12)
+    pad(b, nil, 12, 12, 0, 0)
+    b.MouseButton1Click:Connect(onClick)
+    return b
+end
+
+function renderDetails(id)
+    local data = CalledFunctions[id]
+    if not data then return end
+
+    for _, c in ipairs(VariantBar:GetChildren()) do
+        if c:IsA("TextButton") then c:Destroy() end
+    end
+
+    local list = {}
+    for _, k in ipairs(data.variantOrder) do
+        if data.variants[k] then table.insert(list, data.variants[k]) end
+    end
+    if #list == 0 then return end
+
+    local active = data.variants[SelectedVariantKey] or list[1]
+    SelectedVariantKey     = active.key
+    SelectedFullPath       = data.fullPath
+    SelectedArgs           = active.args
+    SelectedRawArgs        = active.rawArgs
+    SelectedRemoteInstance = active.remoteInstance
+
+    for i, v in ipairs(list) do
+        local blocked = (BlockedFunctions[getCallSignature(data.fullPath, v.rawArgs or v.args)]
+            or (v.remoteInstance and BlockedRemoteInstances[v.remoteInstance])) and true or false
+        variantChip((blocked and "⛔ " or "") .. "Variant " .. i, v.key == SelectedVariantKey, function()
+            SelectedVariantKey = v.key
+            renderDetails(id)
+        end)
+    end
+
+    local sig = getCallSignature(data.fullPath, SelectedRawArgs or SelectedArgs)
+    local blocked  = (BlockedFunctions[sig] or (SelectedRemoteInstance and BlockedRemoteInstances[SelectedRemoteInstance])) and true or false
+    local excluded = ExcludedFunctions[sig] and true or false
+
+    BlockButton.Text   = blocked and "Unblock" or "Block"
+    ExcludeButton.Text = excluded and "Include" or "Exclude"
+    tw(BlockDot,   {BackgroundColor3 = blocked and T.Success or T.Danger})
+    tw(ExcludeDot, {BackgroundColor3 = excluded and T.Violet or T.Accent})
+
+    local args   = active.rawArgs or active.args or {}
+    local method = data.fullPath:match(":(%w+)$") or "FireServer"
+    local sample = buildRemoteCallCode(active.remoteInstance, method, args)
+    local source = active.sourceScript and active.sourceScript:GetFullName() or "unavailable"
+    local trace  = active.traceback or "Traceback unavailable"
+
+    local ups = "  <none or unavailable>"
+    if active.upvalues and next(active.upvalues) then
+        local parts = {}
+        for n, v in pairs(active.upvalues) do
+            table.insert(parts, "  " .. tostring(n) .. " = " .. describeValue(v))
+        end
+        ups = table.concat(parts, "\n")
+    end
+
+    local function section(label, body, col)
+        return ('<font color="#8A91A5">%s</font>\n<font color="%s">%s</font>\n\n')
+            :format(label:upper(), col, escapeRich(body))
+    end
+
+    local d = ('<font color="#E9ECF4"><b>%s</b></font>\n'):format(escapeRich(data.fullPath))
+    d ..= ('<font color="#8A91A5">%s  •  %d variant(s)%s</font>\n\n')
+        :format(os.date("%H:%M:%S", data.time), #list,
+                blocked and '  •  <font color="#E95B65">BLOCKED</font>' or "")
+
+    d ..= '<font color="#8A91A5">PARAMETERS</font>\n'
+    if #args > 0 then
+        for i, a in ipairs(args) do
+            d ..= ('  <font color="#8A91A5">%d</font>  <font color="#A370F6">%s</font>\n')
+                :format(i, escapeRich(formatValue(a)))
+        end
+    else
+        d ..= '  <font color="#8A91A5">none</font>\n'
+    end
+
+    d ..= '\n'
+    d ..= section("Filter signature", sig, "#8A91A5")
+    d ..= section("Calling script", source, "#6885FF")
+    d ..= section("Traceback", trace, "#EEB046")
+    d ..= section("Caller upvalues", ups, "#48C78E")
+
+    d ..= ('\n<font color="#8A91A5">SAMPLE CODE</font>\n<font color="#48C78E">%s</font>')
+        :format(escapeRich(sample))
+
+    DetailsText.Text = d
+end
+
+--==================== LOG ENTRY ====================
+local function selectEntry(id)
+    for otherId, d in pairs(CalledFunctions) do
+        if d.entry then
+            tw(d.entry, {BackgroundColor3 = (otherId == id) and T.Hover or T.Card})
+        end
+    end
+    SelectedId = id
+    SelectedVariantKey = nil
+    renderDetails(id)
+end
+
+local function entryMatchesSearch(id, data, q)
+    if q == "" then return true end
+    local hay = (id or ""):lower()
+    for _, k in ipairs(data.variantOrder) do
+        local v = data.variants[k]
+        if v then
+            local variantPath = v.remoteInstance and v.remoteInstance:GetFullName() or ""
+            local variantArgs = argsToSearchText(v.rawArgs or v.args or {})
+            local variantText = (k or "") .. " " .. variantArgs .. " " .. (variantPath or "")
+            hay = hay .. " " .. variantText:lower()
+        end
+    end
+    return string.find(hay, q, 1, true) ~= nil
+end
+
+local function createLogEntry(fullPath, args, rawArgs, remoteInstance, sourceScript, traceback, upvalues, wasBlocked)
+    local sig = getCallSignature(fullPath, rawArgs or args)
+    if ExcludedFunctions[sig] or ExcludedFunctions[fullPath] then return end
+
+    local id          = fullPath
+    local variantKey  = argsToKey(rawArgs or args or {})
+    local serviceName = fullPath:match("Network:(%w+)")
+        or (remoteInstance and remoteInstance.Parent and remoteInstance.Parent.Name)
+        or "Network"
+
+    local data = CalledFunctions[id]
+    if not data then
+        data = {
+            fullPath     = fullPath,
+            serviceName  = serviceName,
+            serviceColor = getServiceColor(serviceName),
+            variants     = {},
+            variantOrder = {},
+            time         = os.time(),
+        }
+        CalledFunctions[id] = data
+    end
+
+    local v = data.variants[variantKey]
+    if not v then
+        v = { key = variantKey }
+        data.variants[variantKey] = v
+        table.insert(data.variantOrder, variantKey)
+    end
+    v.args, v.rawArgs, v.remoteInstance = args, rawArgs, remoteInstance
+    v.sourceScript, v.upvalues, v.time  = sourceScript, upvalues, os.time()
+    v.blocked = wasBlocked and true or false
+    if traceback and traceback ~= "" then v.traceback = traceback end
+
+    data.time = os.time()
+    callTracebacks[fullPath .. "|" .. variantKey] = traceback
+
+    if not data.entry then
+        local entry = Template:Clone()
+        entry.Name = id
+        entry.FunctionName.Text = getRemoteDisplayName(fullPath)
+        entry.ColorBar.BackgroundColor3 = data.serviceColor
+        entry.MouseEnter:Connect(function()
+            if SelectedId ~= id then tw(entry, {BackgroundColor3 = T.Hover}) end
+        end)
+        entry.MouseLeave:Connect(function()
+            if SelectedId ~= id then tw(entry, {BackgroundColor3 = T.Card}) end
+        end)
+        entry.MouseButton1Click:Connect(function() selectEntry(id) end)
+        entry.Parent = FunctionList
+        data.entry = entry
+
+        local n = 0
+        for _ in pairs(CalledFunctions) do n += 1 end
+        CountLabel.Text = n .. (n == 1 and " REMOTE" or " REMOTES")
+        updateScale()
+    end
+
+    data.entry.Badge.BadgeText.Text = tostring(#data.variantOrder)
+    refreshEntryStyle(data)
+
+    if SearchBar.Text ~= "" then
+        data.entry.Visible = entryMatchesSearch(id, data, normalizeSearchText(SearchBar.Text))
+    else
+        data.entry.Visible = true
+    end
+    if SelectedId == id then renderDetails(id) end
+end
+
+--==================================================================
+--  THE HOOK  •  block enforced here, everything else forwards
+--==================================================================
+local function scanAndHookNetwork()
+    if typeof(hookmetamethod) ~= "function" then
+        updateStatus("hookmetamethod unavailable", true)
+        return
+    end
+
+    oldNamecall = hookmetamethod(
+        game,
+        "__namecall",
+        newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+
+            if method == "FireServer" or method == "InvokeServer" then
+                if not checkcaller() then
+                    local args = { ... }
+                    local sourceScript = getCallingScript()
+                    local traceback = getTraceback()
+                    local callerFunction = getCallerFunction()
+                    local upvalues = getCallerUpvalues(callerFunction)
+
+                    local blocked, blockedPath = false, nil
+                    if next(BlockedRemoteInstances) ~= nil then
+                        for remoteTarget, _ in pairs(BlockedRemoteInstances) do
+                            if self == remoteTarget and (method == "FireServer" or method == "InvokeServer") then
+                                blocked = true
+                                blockedPath = tostring(remoteTarget:GetFullName()) .. ":" .. method
+                                break
+                            end
+                        end
+                    end
+
+                    if not blocked and next(BlockedFunctions) ~= nil then
+                        local ok, path = pcall(function() return self:GetFullName() end)
+                        if ok then
+                            blockedPath = tostring(path) .. ":" .. method
+                            local directMatch = isDirectlyBlockedRemote(self, blockedPath, method, args)
+                            if directMatch then
+                                blocked = true
+                            else
+                                blocked = BlockedFunctions[blockedPath]
+                                    or BlockedFunctions[getCallSignature(blockedPath, args)]
+                            end
+                        end
+                    end
+
+                    if not IsPaused then
+                        local remote = self
+                        local wasBlocked = blocked
+                        task.spawn(function()
+                            local fullPath = blockedPath or (tostring(remote:GetFullName()) .. ":" .. method)
+                            pcall(createLogEntry, fullPath, args, args, remote,
+                                  sourceScript, traceback, upvalues, wasBlocked)
+                            if PRINT_TO_CONSOLE then
+                                logRemote(remote, method, args, sourceScript, traceback, upvalues)
+                            end
+                        end)
+                    end
+
+                    if blocked then
+                        if method == "FireServer" then
+                            return          -- dropped, nothing to return
+                        elseif BLOCK_INVOKES then
+                            return nil      -- caller gets nil instead of a server reply
+                        end
+                        -- BLOCK_INVOKES = false: invoke falls through and answers normally
+                    end
+                end
+            end
+
+            return oldNamecall(self, ...)
+        end)
+    )
+end
+
+--==================== EXECUTION ====================
+local function executeFullPath(fullPath, args, remoteInstance)
+    local method = fullPath:match(":(%w+)$") or "FireServer"
+    if typeof(remoteInstance) ~= "Instance" then
+        return false, "Unknown remote"
+    end
+
+    local sig = getCallSignature(fullPath, args)
+    if BlockedFunctions[sig]
+        or BlockedFunctions[fullPath]
+        or BlockedFunctions[fullPath .. ":" .. method]
+        or BlockedRemoteInstances[remoteInstance] then
+        return false, "Function is blocked"
+    end
+    local ok, err = pcall(function()
+        if method == "InvokeServer" then
+            remoteInstance:InvokeServer(unpack(args or {}))
+        else
+            remoteInstance:FireServer(unpack(args or {}))
+        end
+    end)
+    return ok, err
+end
+
+--==================== DEEP COPY ====================
+local function splitLines(s)
+    local t = {}
+    for l in s:gmatch("([^\r\n]*)\r?\n?") do table.insert(t, l) end
+    if #t > 0 and t[#t] == "" then table.remove(t) end
+    return t
+end
+
+local function generateDeepCopy(fullPath, args)
+    local clip = setclipboard or toclipboard or set_clipboard
+    local out = {}
+    local function add(s) table.insert(out, s) end
+
+    local data    = CalledFunctions[fullPath]
+    local variant = data and data.variants[SelectedVariantKey]
+    local remote  = variant and variant.remoteInstance
+    local method  = fullPath:match(":(%w+)$") or "FireServer"
+    local trace   = callTracebacks[fullPath .. "|" .. argsToKey(args or {})]
+
+    add(("=== %s ==="):format(fullPath))
+    add("")
+    add("--- RUNTIME CALL ---")
+    add(buildRemoteCallCode(remote, method, args))
+    add("")
+
+    if trace and trace ~= "" then
+        add("--- TRACEBACK ---")
+        add(trace)
+        add("")
+    end
+
+    local eventName = args and typeof(args[1]) == "string" and args[1] or nil
+    local patterns = {}
+    if eventName then
+        table.insert(patterns, 'FireServer%s*%(%s*"' .. eventName .. '"')
+        table.insert(patterns, "FireServer%s*%(%s*'" .. eventName .. "'")
+        table.insert(patterns, 'InvokeServer%s*%(%s*"' .. eventName .. '"')
+        table.insert(patterns, '"' .. eventName .. '"')
+        table.insert(patterns, eventName)
+    else
+        table.insert(patterns, (fullPath:match(":(.+)$") or fullPath))
+    end
+
+    if typeof(decompile) ~= "function" then
+        add("decompile() unavailable in this environment — source search skipped.")
+        local res = table.concat(out, "\n")
+        if clip then clip(res) end
+        return res
+    end
+
+    local found, scanned, failed = {}, 0, 0
+    for _, obj in ipairs(game:GetDescendants()) do
+        if obj:IsA("ModuleScript") or obj:IsA("LocalScript") then
+            scanned += 1
+            local ok, src = pcall(decompile, obj)
+            if ok and src then
+                for idx, p in ipairs(patterns) do
+                    if src:find(p) then
+                        table.insert(found, { path = getInstancePath(obj), source = src, pattern = p, idx = idx })
+                        break
+                    end
+                end
+            elseif not ok then
+                failed += 1
+            end
+        end
+    end
+
+    add(("--- SEARCH: %d scanned, %d failed, %d matches ---"):format(scanned, failed, #found))
+    add("")
+    table.sort(found, function(a, b) return a.idx < b.idx end)
+
+    for n, m in ipairs(found) do
+        add(("=== MATCH #%d — %s ==="):format(n, m.path))
+        add("Pattern: " .. m.pattern)
+        add("")
+        add(m.source)
+        add("")
+        local lines = splitLines(m.source)
+        add("--- MATCHING LINES ---")
+        for i, line in ipairs(lines) do
+            for _, p in ipairs(patterns) do
+                if line:find(p) then
+                    for ln = math.max(1, i - 4), math.min(#lines, i + 4) do
+                        add(("%s%4d: %s"):format(ln == i and ">>> " or "    ", ln, lines[ln]))
+                    end
+                    add("")
+                    break
+                end
+            end
+        end
+    end
+
+    local res = table.concat(out, "\n")
+    if clip then clip(res) end
+    return res
+end
+
+--==================== INTERACTION ====================
+local function flash(button, text, revert, isError)
+    local original = button.Text
+    button.Text = text
+    updateStatus(text, isError)
+    task.delay(revert or 1.2, function()
+        button.Text = original
+        updateStatus(IsPaused and "Paused" or "Monitoring", false)
+    end)
+end
+
+SearchBar:GetPropertyChangedSignal("Text"):Connect(function()
+    local q = normalizeSearchText(SearchBar.Text)
+    local matchedId
+    local matchedVariant
+
+    for id, d in pairs(CalledFunctions) do
+        if d.entry then
+            local hay = normalizeSearchText(id or "")
+            local bestVariant
+
+            for _, k in ipairs(d.variantOrder) do
+                local v = d.variants[k]
+                if v then
+                    local variantPath = v and v.remoteInstance and v.remoteInstance:GetFullName() or ""
+                    local variantText = (k or "") .. " " .. argsToSearchText(v and (v.rawArgs or v.args) or {}) .. " " .. variantPath
+                    local normalizedVariantText = normalizeSearchText(variantText)
+                    hay = hay .. " " .. normalizedVariantText
+
+                    if q ~= "" and string.find(normalizedVariantText, q, 1, true) ~= nil then
+                        if not matchedId then
+                            matchedId = id
+                            matchedVariant = k
+                        end
+                        if not bestVariant then
+                            bestVariant = k
+                        end
+                    end
+                end
+            end
+
+            local visible = q == "" or string.find(hay, q, 1, true) ~= nil
+            d.entry.Visible = visible
+
+            if q ~= "" and visible and not matchedId then
+                matchedId = id
+                matchedVariant = bestVariant or d.variantOrder[1]
+            end
+        end
+    end
+
+    if q == "" then
+        if SelectedId and CalledFunctions[SelectedId] and CalledFunctions[SelectedId].entry then
+            renderDetails(SelectedId)
+        end
+        return
+    end
+
+    if matchedId and matchedVariant then
+        SelectedId = matchedId
+        SelectedVariantKey = matchedVariant
+        renderDetails(matchedId)
+    elseif SelectedId and CalledFunctions[SelectedId] and CalledFunctions[SelectedId].entry then
+        local currentVisible = CalledFunctions[SelectedId].entry.Visible
+        if currentVisible then
+            renderDetails(SelectedId)
+        end
+    end
+end)
+
+Hide.MouseButton1Click:Connect(function()
+    Main.Visible = false
+    Floating.Visible = true
+end)
+Floating.MouseButton1Click:Connect(function()
+    Main.Visible = true
+    Floating.Visible = false
+end)
+Close.MouseButton1Click:Connect(function() Gui:Destroy() end)
+
+PauseButton.MouseButton1Click:Connect(function()
+    IsPaused = not IsPaused
+    PauseButton.Text = IsPaused and "Resume" or "Pause"
+    updateStatus(IsPaused and "Paused" or "Monitoring", false)
+end)
+
+ClearButton.MouseButton1Click:Connect(function()
+    for _, d in pairs(CalledFunctions) do
+        if d.entry then d.entry:Destroy() end
+    end
+    CalledFunctions, callTracebacks = {}, {}
+    SelectedId, SelectedVariantKey, SelectedFullPath = nil, nil, nil
+    for _, c in ipairs(VariantBar:GetChildren()) do
+        if c:IsA("TextButton") then c:Destroy() end
+    end
+    CountLabel.Text = "0 REMOTES"
+    DetailsText.Text = '<font color="#8A91A5">Log cleared. Waiting for remote traffic…</font>'
+    updateStatus("Log cleared", false)
+end)
+
+UnblockAllButton.MouseButton1Click:Connect(function()
+    BlockedFunctions = {}
+    BlockedRemoteInstances = {}
+    BlockButton.Text = "Block"
+    tw(BlockDot, {BackgroundColor3 = T.Danger})
+    for _, d in pairs(CalledFunctions) do refreshEntryStyle(d) end
+    if SelectedId then renderDetails(SelectedId) end
+    updateStatus("Unblocked all", false)
+end)
+
+UnexcludeAllButton.MouseButton1Click:Connect(function()
+    ExcludedFunctions = {}
+    ExcludeButton.Text = "Exclude"
+    tw(ExcludeDot, {BackgroundColor3 = T.Accent})
+    updateStatus("Unexcluded all", false)
+end)
+
+CopyButton.MouseButton1Click:Connect(function()
+    if not SelectedFullPath then return end
+    local method = SelectedFullPath:match(":(%w+)$") or "FireServer"
+    setclipboard(buildRemoteCallCode(SelectedRemoteInstance, method, SelectedRawArgs or SelectedArgs))
+    flash(CopyButton, "Copied", 1)
+end)
+
+LoopButton.MouseButton1Click:Connect(function()
+    if not SelectedFullPath then return end
+    local method = SelectedFullPath:match(":(%w+)$") or "FireServer"
+    local code = "while task.wait(0.1) do\n    local args = {\n"
+    for i, a in ipairs(SelectedRawArgs or {}) do
+        code ..= ("        [%d] = %s,\n"):format(i, formatValue(a))
+    end
+    code ..= "    }\n    " .. getInstancePath(SelectedRemoteInstance) .. ":" .. method .. "(unpack(args))\nend"
+    setclipboard(code)
+    flash(LoopButton, "Copied", 1)
+end)
+
+RunButton.MouseButton1Click:Connect(function()
+    if not SelectedFullPath then return end
+    local ok, err = executeFullPath(SelectedFullPath, SelectedRawArgs, SelectedRemoteInstance)
+    flash(RunButton, ok and "Fired" or (tostring(err):find("blocked") and "Blocked" or "Failed"), 1, not ok)
+end)
+
+DeepCopyButton.MouseButton1Click:Connect(function()
+    if not SelectedFullPath then return end
+    DeepCopyButton.Text = "Scanning…"
+    updateStatus("Scanning scripts…", false)
+    task.spawn(function()
+        local ok, res = pcall(generateDeepCopy, SelectedFullPath, SelectedRawArgs)
+        DeepCopyButton.Text = "Deep Copy"
+        flash(DeepCopyButton, (ok and res and res ~= "") and "Copied" or "Failed", 1.4, not ok)
+    end)
+end)
+
+BlockButton.MouseButton1Click:Connect(function()
+    if not SelectedRemoteInstance then return end
+    local blockedTarget = describeBlockedTarget(SelectedFullPath, SelectedRemoteInstance)
+    local isBlocked = BlockedRemoteInstances[SelectedRemoteInstance]
+
+    if isBlocked then
+        BlockedRemoteInstances[SelectedRemoteInstance] = nil
+        BlockButton.Text = "Block"
+        tw(BlockDot, {BackgroundColor3 = T.Danger})
+        updateStatus("Unblocked: " .. blockedTarget, false)
+    else
+        BlockedRemoteInstances[SelectedRemoteInstance] = true
+        BlockButton.Text = "Unblock"
+        tw(BlockDot, {BackgroundColor3 = T.Success})
+        updateStatus("Blocked: " .. blockedTarget, false)
+    end
+
+    if SelectedId then
+        refreshEntryStyle(CalledFunctions[SelectedId])
+        renderDetails(SelectedId)
+    end
+end)
+
+ExcludeButton.MouseButton1Click:Connect(function()
+    if not SelectedFullPath then return end
+    local sig = getCallSignature(SelectedFullPath, SelectedRawArgs or SelectedArgs)
+    if ExcludedFunctions[sig] then
+        ExcludedFunctions[sig] = nil
+        updateStatus("Included", false)
+    else
+        ExcludedFunctions[sig] = true
+        updateStatus("Excluded", false)
+    end
+    renderDetails(SelectedId)
+end)
+
+-- drag
+local function makeDraggable(handle, target)
+    local dragging, startInput, startPos
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging, startInput, startPos = true, input.Position, target.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - startInput
+            target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
+                                        startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+end
+makeDraggable(Header, Main)
+makeDraggable(Floating, Floating)
+
+-- resize
+local resizing, activeGrip, startSize, startAbsPos, startMouse
+for name, g in pairs(Grips) do
+    g.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            resizing, activeGrip = true, name
+            startSize, startAbsPos = Main.AbsoluteSize, Main.AbsolutePosition
+            startMouse = Vector2.new(input.Position.X, input.Position.Y)
+        end
+    end)
+    g.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            resizing, activeGrip = false, nil
+        end
+    end)
+end
+
+UserInputService.InputChanged:Connect(function(input)
+    if not resizing or not activeGrip then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseMovement
+    and input.UserInputType ~= Enum.UserInputType.Touch then return end
+
+    local delta = Vector2.new(input.Position.X, input.Position.Y) - startMouse
+    local w, h = startSize.X, startSize.Y
+
+    if activeGrip:find("Right")  then w = startSize.X + delta.X end
+    if activeGrip:find("Left")   then w = startSize.X - delta.X end
+    if activeGrip:find("Bottom") then h = startSize.Y + delta.Y end
+    if activeGrip:find("Top")    then h = startSize.Y - delta.Y end
+
+    w = math.clamp(w, 620, 1500)
+    h = math.clamp(h, 400, 950)
+
+    local x = activeGrip:find("Left") and (startAbsPos.X + (startSize.X - w)) or startAbsPos.X
+    local y = activeGrip:find("Top")  and (startAbsPos.Y + (startSize.Y - h)) or startAbsPos.Y
+
+    Main.Position = UDim2.new(0, x, 0, y)
+    Main.Size = UDim2.new(0, w, 0, h)
+end)
+
+--==================== BOOT ====================
+DetailsText.Text = [[<font color="#E9ECF4"><b>Network Spy</b></font>
+
+<font color="#8A91A5">Listening for FireServer / InvokeServer through the __namecall hook.</font>
+
+<font color="#6885FF">LIST</font>  one card per remote — the badge counts distinct argument sets.
+<font color="#A370F6">VARIANTS</font>  chips above switch between captured argument sets.
+<font color="#48C78E">COPY / RUN / LOOP</font>  operate on the selected variant's runtime values.
+<font color="#EEB046">EXCLUDE</font>  hides a signature from the log.
+<font color="#E95B65">BLOCK</font>  stops that signature from reaching the server.
+
+<font color="#8A91A5">Drag the header to move. Drag any corner to resize.</font>]]
+
+updateScale()
+updateStatus("Monitoring", false)
+scanAndHookNetwork()
