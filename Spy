@@ -42,6 +42,8 @@ local serviceColorIndex = 1
 local SelectedId, SelectedVariantKey
 local SelectedFullPath, SelectedArgs, SelectedRawArgs, SelectedRemoteInstance
 local DeepCopySequence = 0
+local DeepCopyChunks = {}
+local ChunkPicker
 local oldNamecall
 
 local function corner(p, r)
@@ -381,6 +383,9 @@ CopyModeButton.MouseButton1Click:Connect(function()
         TextColor3 = T.Dim,
     })
     tw(CopyModeStroke, {Color = CopyAllMode and T.Success or T.Violet, Transparency = 0.15})
+    if CopyAllMode and ChunkPicker then
+        ChunkPicker.Visible = false
+    end
 end)
 
 local Footer = frame(Main, "Footer", UDim2.new(0, 0, 1, -46), UDim2.new(1, 0, 0, 46), T.Surface)
@@ -442,6 +447,67 @@ local UnexcludeAllButton = footerButton("Unexclude All", T.Accent,  4)
 CopyModeButton.Parent = FooterButtons
 CopyModeButton.LayoutOrder = 5
 updateFooterButtons()
+
+ChunkPicker = frame(Gui, "ChunkPicker", UDim2.new(0.5, -180, 0.5, -120), UDim2.new(0, 360, 0, 240), T.Base)
+ChunkPicker.Visible = false
+ChunkPicker.ZIndex = 20
+corner(ChunkPicker, 12)
+stroke(ChunkPicker, T.Violet, 1, 0.25)
+
+local ChunkHeader = frame(ChunkPicker, "Header", UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 0, 40), T.Surface)
+ChunkHeader.ZIndex = 21
+corner(ChunkHeader, 12)
+frame(ChunkHeader, "Fill", UDim2.new(0, 0, 1, -12), UDim2.new(1, 0, 0, 12), T.Surface).ZIndex = 21
+
+local ChunkTitle = Instance.new("TextLabel")
+ChunkTitle.Parent = ChunkHeader
+ChunkTitle.BackgroundTransparency = 1
+ChunkTitle.Position = UDim2.new(0, 14, 0, 0)
+ChunkTitle.Size = UDim2.new(1, -56, 1, 0)
+ChunkTitle.Font = Enum.Font.GothamBold
+ChunkTitle.Text = "Copy a chunk"
+ChunkTitle.TextColor3 = T.Text
+ChunkTitle.TextXAlignment = Enum.TextXAlignment.Left
+ChunkTitle.ZIndex = 22
+baseText(ChunkTitle, 13)
+
+local ChunkClose = Instance.new("TextButton")
+ChunkClose.Name = "Close"
+ChunkClose.Parent = ChunkHeader
+ChunkClose.BackgroundColor3 = T.Card
+ChunkClose.BorderSizePixel = 0
+ChunkClose.AutoButtonColor = false
+ChunkClose.Position = UDim2.new(1, -34, 0.5, -11)
+ChunkClose.Size = UDim2.new(0, 22, 0, 22)
+ChunkClose.Font = Enum.Font.GothamBold
+ChunkClose.Text = "X"
+ChunkClose.TextColor3 = T.Dim
+ChunkClose.ZIndex = 22
+baseText(ChunkClose, 12)
+corner(ChunkClose, 7)
+ChunkClose.MouseEnter:Connect(function() tw(ChunkClose, {BackgroundColor3 = T.Danger, TextColor3 = T.Text}) end)
+ChunkClose.MouseLeave:Connect(function() tw(ChunkClose, {BackgroundColor3 = T.Card, TextColor3 = T.Dim}) end)
+ChunkClose.MouseButton1Click:Connect(function()
+    ChunkPicker.Visible = false
+end)
+
+local ChunkList = Instance.new("ScrollingFrame")
+ChunkList.Name = "ChunkList"
+ChunkList.Parent = ChunkPicker
+ChunkList.BackgroundTransparency = 1
+ChunkList.BorderSizePixel = 0
+ChunkList.Position = UDim2.new(0, 12, 0, 52)
+ChunkList.Size = UDim2.new(1, -24, 1, -64)
+ChunkList.CanvasSize = UDim2.new(0, 0, 0, 0)
+ChunkList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+ChunkList.ScrollBarThickness = 3
+ChunkList.ScrollBarImageColor3 = T.Border
+ChunkList.ZIndex = 21
+
+local ChunkLayout = Instance.new("UIListLayout")
+ChunkLayout.Parent = ChunkList
+ChunkLayout.Padding = UDim.new(0, 6)
+ChunkLayout.SortOrder = Enum.SortOrder.LayoutOrder
 
 local Floating = Instance.new("TextButton")
 Floating.Name = "Floating"
@@ -1407,18 +1473,60 @@ local function splitClipboardChunks(text)
     return chunks
 end
 
-local function copyClipboardChunk(chunks, index, sequence)
-    if sequence ~= DeepCopySequence then return end
+local function showChunkPicker(chunks)
+    DeepCopyChunks = chunks
 
-    local clip = setclipboard or toclipboard or set_clipboard
-    if not clip or not chunks[index] then return end
-    clip(chunks[index])
+    for _, child in ipairs(ChunkList:GetChildren()) do
+        if child:IsA("TextButton") then
+            child:Destroy()
+        end
+    end
 
-    if index > 1 then
-        task.delay(1, function()
-            copyClipboardChunk(chunks, index - 1, sequence)
+    ChunkTitle.Text = ("Copy a chunk (%d total)"):format(#chunks)
+    for index, chunk in ipairs(chunks) do
+        local button = Instance.new("TextButton")
+        button.Name = "Chunk" .. index
+        button.Parent = ChunkList
+        button.BackgroundColor3 = T.Card
+        button.BorderSizePixel = 0
+        button.AutoButtonColor = false
+        button.Size = UDim2.new(1, 0, 0, 32)
+        button.Font = Enum.Font.GothamMedium
+        button.Text = ("Chunk %d - %d characters"):format(index, #chunk)
+        button.TextColor3 = T.Text
+        button.ZIndex = 22
+        baseText(button, 12)
+        corner(button, 8)
+        local buttonStroke = stroke(button, T.Violet, 1, 0.55)
+        buttonStroke.ZIndex = 22
+
+        button.MouseEnter:Connect(function()
+            tw(button, {BackgroundColor3 = T.Hover})
+            tw(buttonStroke, {Transparency = 0.15})
+        end)
+        button.MouseLeave:Connect(function()
+            tw(button, {BackgroundColor3 = T.Card})
+            tw(buttonStroke, {Transparency = 0.55})
+        end)
+        button.MouseButton1Click:Connect(function()
+            local clip = setclipboard or toclipboard or set_clipboard
+            if not clip then
+                updateStatus("Clipboard unavailable", true)
+                return
+            end
+
+            clip(chunk)
+            button.Text = ("Chunk %d copied!"):format(index)
+            updateStatus(("Chunk %d copied"):format(index), false)
+            task.delay(1.2, function()
+                if button.Parent then
+                    button.Text = ("Chunk %d - %d characters"):format(index, #chunk)
+                end
+            end)
         end)
     end
+
+    ChunkPicker.Visible = true
 end
 
 local function flash(button, text, revert, isError, restoreText)
@@ -1581,9 +1689,9 @@ DeepCopyButton.MouseButton1Click:Connect(function()
                 if clip then clip(res) end
             else
                 local chunks = splitClipboardChunks(res)
-                copyClipboardChunk(chunks, #chunks, sequence)
+                showChunkPicker(chunks)
             end
-            flash(DeepCopyButton, "Copied", 1.4, false)
+            flash(DeepCopyButton, CopyAllMode and "Copied" or "Chunks ready", 1.4, false)
         else
             flash(DeepCopyButton, "Failed", 1.4, not ok)
         end
