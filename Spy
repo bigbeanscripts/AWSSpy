@@ -41,6 +41,7 @@ local serviceColorIndex = 1
 
 local SelectedId, SelectedVariantKey
 local SelectedFullPath, SelectedArgs, SelectedRawArgs, SelectedRemoteInstance
+local DeepCopySequence = 0
 local oldNamecall
 
 local function corner(p, r)
@@ -77,6 +78,12 @@ end
 
 local function tw(inst, props, time)
     TweenService:Create(inst, TweenInfo.new(time or 0.14, Enum.EasingStyle.Quad), props):Play()
+end
+
+local PlayerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
+local ExistingGui = PlayerGui:FindFirstChild("NetworkSpy")
+if ExistingGui then
+    ExistingGui:Destroy()
 end
 
 local Gui = Instance.new("ScreenGui")
@@ -349,13 +356,43 @@ local LoopButton     = actionButton(Toolbar, "Loop",     "Loop",      T.Warning,
 local ExcludeButton, ExcludeStroke, ExcludeDot = actionButton(Toolbar, "Exclude", "Exclude", T.Accent, 5)
 local BlockButton,   BlockStroke,   BlockDot   = actionButton(Toolbar, "Block",   "Block",   T.Danger, 6)
 
+local CopyAllMode = true
+local CopyModeButton = Instance.new("TextButton")
+CopyModeButton.Name = "CopyMode"
+CopyModeButton.Parent = Details
+CopyModeButton.Position = UDim2.new(1, -116, 1, -6)
+CopyModeButton.Size = UDim2.new(0, 110, 0, 28)
+CopyModeButton.BackgroundColor3 = T.Card
+CopyModeButton.BorderSizePixel = 0
+CopyModeButton.AutoButtonColor = false
+CopyModeButton.Font = Enum.Font.GothamMedium
+CopyModeButton.TextColor3 = T.Dim
+CopyModeButton.Text = "Copy: ALL"
+CopyModeButton.ZIndex = 2
+baseText(CopyModeButton, 11)
+corner(CopyModeButton, 12)
+pad(CopyModeButton, nil, 12, 12, 0, 0)
+local CopyModeStroke = stroke(CopyModeButton, T.Success, 1, 0.15)
+CopyModeButton.MouseButton1Click:Connect(function()
+    CopyAllMode = not CopyAllMode
+    CopyModeButton.Text = CopyAllMode and "Copy: ALL" or "Copy: CHUNKS"
+    tw(CopyModeButton, {
+        BackgroundColor3 = T.Card,
+        TextColor3 = T.Dim,
+    })
+    tw(CopyModeStroke, {Color = CopyAllMode and T.Success or T.Violet, Transparency = 0.15})
+end)
+
 local Footer = frame(Main, "Footer", UDim2.new(0, 0, 1, -46), UDim2.new(1, 0, 0, 46), T.Surface)
 corner(Footer, 14)
 frame(Footer, "FooterFill", UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 0, 14), T.Surface)
 pad(Footer, nil, 12, 12, 6, 6)
 
+local FooterButtons = frame(Footer, "FooterButtons", UDim2.new(0, 12, 0, 6), UDim2.new(1, -24, 1, -12), T.Surface)
+FooterButtons.BackgroundTransparency = 1
+
 local FooterLayout = Instance.new("UIListLayout")
-FooterLayout.Parent = Footer
+FooterLayout.Parent = FooterButtons
 FooterLayout.FillDirection = Enum.FillDirection.Horizontal
 FooterLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 FooterLayout.VerticalAlignment = Enum.VerticalAlignment.Center
@@ -364,7 +401,7 @@ FooterLayout.SortOrder = Enum.SortOrder.LayoutOrder
 
 local function footerButton(text, col, order)
     local b = Instance.new("TextButton")
-    b.Parent = Footer
+    b.Parent = FooterButtons
     b.BackgroundColor3 = T.Card
     b.BorderSizePixel = 0
     b.AutoButtonColor = false
@@ -387,21 +424,23 @@ local function footerButton(text, col, order)
 end
 
 local function updateFooterButtons()
-    local width = math.max(Footer.AbsoluteSize.X - 24, 1)
-    local usable = math.max(width - (8 * 3), 1)
-    local cellW = math.max((usable / 4), 80)
-    for _, child in ipairs(Footer:GetChildren()) do
+    local width = math.max(FooterButtons.AbsoluteSize.X, 1)
+    local usable = math.max(width - (8 * 4), 1)
+    local cellW = math.max((usable / 5), 80)
+    for _, child in ipairs(FooterButtons:GetChildren()) do
         if child:IsA("TextButton") then
             child.Size = UDim2.new(0, cellW, 0, 28)
         end
     end
 end
-Footer:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateFooterButtons)
+FooterButtons:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateFooterButtons)
 
 local ClearButton        = footerButton("Clear Log",     T.Danger,  1)
 local PauseButton        = footerButton("Pause",         T.Warning, 2)
 local UnblockAllButton   = footerButton("Unblock All",   T.Success, 3)
 local UnexcludeAllButton = footerButton("Unexclude All", T.Accent,  4)
+CopyModeButton.Parent = FooterButtons
+CopyModeButton.LayoutOrder = 5
 updateFooterButtons()
 
 local Floating = Instance.new("TextButton")
@@ -705,6 +744,9 @@ end
 
 local function buildRemoteCallCode(remoteInstance, method, rawArgs)
     local args = rawArgs or {}
+    if #args == 0 then
+        return getInstancePath(remoteInstance) .. ":" .. method .. "()"
+    end
     local code = "local args = {\n"
     for index, value in ipairs(args) do
         code = code .. string.format("    [%d] = %s,\n", index, formatValue(value))
@@ -1273,7 +1315,6 @@ local function splitLines(s)
 end
 
 local function generateDeepCopy(fullPath, args)
-    local clip = setclipboard or toclipboard or set_clipboard
     local out = {}
     local function add(s) table.insert(out, s) end
 
@@ -1295,75 +1336,93 @@ local function generateDeepCopy(fullPath, args)
         add("")
     end
 
-    local eventName = args and typeof(args[1]) == "string" and args[1] or nil
-    local patterns = {}
-    if eventName then
-        table.insert(patterns, 'FireServer%s*%(%s*"' .. eventName .. '"')
-        table.insert(patterns, "FireServer%s*%(%s*'" .. eventName .. "'")
-        table.insert(patterns, 'InvokeServer%s*%(%s*"' .. eventName .. '"')
-        table.insert(patterns, '"' .. eventName .. '"')
-        table.insert(patterns, eventName)
-    else
-        table.insert(patterns, (fullPath:match(":(.+)$") or fullPath))
-    end
-
     if typeof(decompile) ~= "function" then
         add("decompile() unavailable in this environment — source search skipped.")
-        local res = table.concat(out, "\n")
-        if clip then clip(res) end
-        return res
+        return table.concat(out, "\n")
     end
 
-    local found, scanned, failed = {}, 0, 0
-    for _, obj in ipairs(game:GetDescendants()) do
-        if obj:IsA("ModuleScript") or obj:IsA("LocalScript") then
-            scanned += 1
-            local ok, src = pcall(decompile, obj)
-            if ok and src then
-                for idx, p in ipairs(patterns) do
-                    if src:find(p) then
-                        table.insert(found, { path = getInstancePath(obj), source = src, pattern = p, idx = idx })
-                        break
-                    end
-                end
-            elseif not ok then
+    local paths, seenPaths = {}, {}
+    for line in (trace or ""):gmatch("[^\r\n]+") do
+        local path = line:match("^([^:]+):%d+")
+        if path and not path:find("_Index", 1, true) and not seenPaths[path] then
+            seenPaths[path] = true
+            table.insert(paths, path)
+        end
+    end
+
+    local found, failed = {}, 0
+    for _, path in ipairs(paths) do
+        local target
+        for _, obj in ipairs(game:GetDescendants()) do
+            if (obj:IsA("ModuleScript") or obj:IsA("LocalScript"))
+                and obj:GetFullName() == path then
+                target = obj
+                break
+            end
+        end
+
+        if target then
+            local ok, source = pcall(decompile, target)
+            if ok and source then
+                table.insert(found, {path = path, source = source})
+            else
                 failed += 1
             end
+        else
+            failed += 1
         end
     end
 
-    add(("--- SEARCH: %d scanned, %d failed, %d matches ---"):format(scanned, failed, #found))
+    add(("--- DECOMPILED: %d, failed: %d ---"):format(#found, failed))
     add("")
-    table.sort(found, function(a, b) return a.idx < b.idx end)
 
-    for n, m in ipairs(found) do
-        add(("=== MATCH #%d — %s ==="):format(n, m.path))
-        add("Pattern: " .. m.pattern)
+    for _, result in ipairs(found) do
+        add("=== " .. result.path .. " ===")
         add("")
-        add(m.source)
+        add(result.source)
         add("")
-        local lines = splitLines(m.source)
-        add("--- MATCHING LINES ---")
-        for i, line in ipairs(lines) do
-            for _, p in ipairs(patterns) do
-                if line:find(p) then
-                    for ln = math.max(1, i - 4), math.min(#lines, i + 4) do
-                        add(("%s%4d: %s"):format(ln == i and ">>> " or "    ", ln, lines[ln]))
-                    end
-                    add("")
-                    break
-                end
-            end
-        end
     end
 
     local res = table.concat(out, "\n")
-    if clip then clip(res) end
     return res
 end
 
-local function flash(button, text, revert, isError)
-    local original = button.Text
+local function splitClipboardChunks(text)
+    local chunks = {}
+    local startIndex = 1
+    local maxLength = 10000
+
+    while startIndex <= #text do
+        local endIndex = math.min(startIndex + maxLength - 1, #text)
+        if endIndex < #text then
+            local lastNewline = text:sub(startIndex, endIndex):match(".*()\n")
+            if lastNewline and lastNewline > 1 then
+                endIndex = startIndex + lastNewline - 1
+            end
+        end
+        table.insert(chunks, text:sub(startIndex, endIndex))
+        startIndex = endIndex + 1
+    end
+
+    return chunks
+end
+
+local function copyClipboardChunk(chunks, index, sequence)
+    if sequence ~= DeepCopySequence then return end
+
+    local clip = setclipboard or toclipboard or set_clipboard
+    if not clip or not chunks[index] then return end
+    clip(chunks[index])
+
+    if index > 1 then
+        task.delay(1, function()
+            copyClipboardChunk(chunks, index - 1, sequence)
+        end)
+    end
+end
+
+local function flash(button, text, revert, isError, restoreText)
+    local original = restoreText or button.Text
     button.Text = text
     updateStatus(text, isError)
     task.delay(revert or 1.2, function()
@@ -1439,7 +1498,9 @@ Floating.MouseButton1Click:Connect(function()
     Main.Visible = true
     Floating.Visible = false
 end)
-Close.MouseButton1Click:Connect(function() Gui:Destroy() end)
+Close.MouseButton1Click:Connect(function()
+    Gui:Destroy()
+end)
 
 PauseButton.MouseButton1Click:Connect(function()
     IsPaused = not IsPaused
@@ -1462,13 +1523,15 @@ ClearButton.MouseButton1Click:Connect(function()
 end)
 
 UnblockAllButton.MouseButton1Click:Connect(function()
-    BlockedFunctions = {}
+    for key in pairs(BlockedFunctions) do
+        BlockedFunctions[key] = nil
+    end
     BlockedRemoteInstances = {}
     BlockButton.Text = "Block"
     tw(BlockDot, {BackgroundColor3 = T.Danger})
     for _, d in pairs(CalledFunctions) do refreshEntryStyle(d) end
     if SelectedId then renderDetails(SelectedId) end
-    updateStatus("Unblocked all", false)
+    updateStatus("Monitoring", false)
 end)
 
 UnexcludeAllButton.MouseButton1Click:Connect(function()
@@ -1500,35 +1563,50 @@ end)
 RunButton.MouseButton1Click:Connect(function()
     if not SelectedFullPath then return end
     local ok, err = executeFullPath(SelectedFullPath, SelectedRawArgs, SelectedRemoteInstance)
-    flash(RunButton, ok and "Fired" or (tostring(err):find("blocked") and "Blocked" or "Failed"), 1, not ok)
+    flash(RunButton, ok and "Fired" or (tostring(err):find("blocked") and "Blocked" or "Failed"), 1, not ok, "Run")
 end)
 
 DeepCopyButton.MouseButton1Click:Connect(function()
     if not SelectedFullPath then return end
+    DeepCopySequence += 1
+    local sequence = DeepCopySequence
     DeepCopyButton.Text = "Scanning…"
     updateStatus("Scanning scripts…", false)
     task.spawn(function()
         local ok, res = pcall(generateDeepCopy, SelectedFullPath, SelectedRawArgs)
         DeepCopyButton.Text = "Deep Copy"
-        flash(DeepCopyButton, (ok and res and res ~= "") and "Copied" or "Failed", 1.4, not ok)
+        if ok and res and res ~= "" then
+            if CopyAllMode then
+                local clip = setclipboard or toclipboard or set_clipboard
+                if clip then clip(res) end
+            else
+                local chunks = splitClipboardChunks(res)
+                copyClipboardChunk(chunks, #chunks, sequence)
+            end
+            flash(DeepCopyButton, "Copied", 1.4, false)
+        else
+            flash(DeepCopyButton, "Failed", 1.4, not ok)
+        end
     end)
 end)
 
 BlockButton.MouseButton1Click:Connect(function()
     if not SelectedRemoteInstance then return end
-    local blockedTarget = describeBlockedTarget(SelectedFullPath, SelectedRemoteInstance)
-    local isBlocked = BlockedRemoteInstances[SelectedRemoteInstance]
+    local blockKey = SelectedFullPath or SelectedRemoteInstance:GetFullName()
+    local isBlocked = BlockedRemoteInstances[SelectedRemoteInstance] or BlockedFunctions[blockKey]
 
     if isBlocked then
         BlockedRemoteInstances[SelectedRemoteInstance] = nil
+        BlockedFunctions[blockKey] = nil
         BlockButton.Text = "Block"
         tw(BlockDot, {BackgroundColor3 = T.Danger})
-        updateStatus("Unblocked: " .. blockedTarget, false)
+        updateStatus("Monitoring", false)
     else
         BlockedRemoteInstances[SelectedRemoteInstance] = true
+        BlockedFunctions[blockKey] = true
         BlockButton.Text = "Unblock"
         tw(BlockDot, {BackgroundColor3 = T.Success})
-        updateStatus("Blocked: " .. blockedTarget, false)
+        updateStatus("Monitoring", false)
     end
 
     if SelectedId then
@@ -1629,4 +1707,3 @@ DetailsText.Text = [[<font color="#E9ECF4"><b>Network Spy</b></font>
 updateScale()
 updateStatus("Monitoring", false)
 scanAndHookNetwork()
-
